@@ -1,0 +1,11 @@
+# Define RTE variables
+include $(RTE_SDK)/mk/rte.vars.mk
+
+# Define the applications to build
+APP = echo_server 
+
+# Define source files
+SRCS-y := echo_server.c
+
+# Include DPDK build system
+include $(RTE_SDK)/mk/rte.extapp.mk
