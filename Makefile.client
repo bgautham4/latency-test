@@ -7,5 +7,8 @@ APP = echo_client
 # Define source files
 SRCS-y += echo_client.c
 
+# Default target, can be overridden by command line or environment
+RTE_TARGET ?= x86_64-native-linuxapp-gcc
+
 # Include DPDK build system
 include $(RTE_SDK)/mk/rte.extapp.mk
