@@ -2,6 +2,8 @@
 // Receives packets and sends them back to sender
 // Uses port 1, leaving port 0 for Linux
 
+#include "rte_ether.h"
+#include "rte_ring.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -95,8 +97,9 @@ static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool) {
     return 0;
 }
 
-// Main function for echo server
-static void lcore_main(void) {
+// Rx loop
+static int lcore_rx_loop(void *args) {
+    struct rte_ring *pkt_ring = (struct rte_ring*)args;
     struct rte_mbuf *bufs[BURST_SIZE];
     struct ether_hdr *eth_hdr;
     uint16_t port = PORT_ID;  // Use port 1
@@ -106,35 +109,45 @@ static void lcore_main(void) {
     while (1) {
         /* Get burst of RX packets. */
         const uint16_t nb_rx = rte_eth_rx_burst(port, 0, bufs, BURST_SIZE);
-        
+
         if (nb_rx == 0)
             continue;
 
-        /* Echo back received packets */
-        for (int i = 0; i < nb_rx; i++) {
-            eth_hdr = rte_pktmbuf_mtod(bufs[i], struct ether_hdr *);
-            
-            /* Swap source and destination MAC addresses */
-            struct ether_addr temp_addr;
-            ether_addr_copy(&eth_hdr->d_addr, &temp_addr);
-            ether_addr_copy(&eth_hdr->s_addr, &eth_hdr->d_addr);
-            ether_addr_copy(&temp_addr, &eth_hdr->s_addr);
-        }
-
-        /* Send back packets */
-        const uint16_t nb_tx = rte_eth_tx_burst(port, 0, bufs, nb_rx);
-        
-        /* Free any unsent packets */
-        if (unlikely(nb_tx < nb_rx)) {
-            uint16_t buf;
-            for (buf = nb_tx; buf < nb_rx; buf++)
-                rte_pktmbuf_free(bufs[buf]);
+        for (int i = 0; i < nb_rx; ++i) {
+            rte_ring_enqueue(pkt_ring, (void *)bufs[i]);
         }
     }
+    return -1;
+}
+
+//Tx loop
+static int lcore_tx_loop(void *args) {
+    struct rte_ring *pkt_ring = (struct rte_ring *)args;
+    struct rte_mbuf *pkt;
+    while(1) {
+        if (rte_ring_dequeue(pkt_ring, (void **)&pkt) == -ENOENT) {
+            continue;
+        }
+        /* Swap source and destination MAC addresses */
+        struct ether_hdr *pkt_eth_hdr = rte_pktmbuf_mtod(pkt, struct ether_hdr*);
+        uint8_t (*addr_bytes)[ETHER_ADDR_LEN] = &pkt_eth_hdr->d_addr.addr_bytes;
+        printf("Got a packet from: %x:%x:%x:%x:%x:%x\n", (*addr_bytes)[0], (*addr_bytes)[1], (*addr_bytes)[2], (*addr_bytes)[3], (*addr_bytes)[4], (*addr_bytes)[5]);
+        struct ether_addr temp_addr;
+        ether_addr_copy(&pkt_eth_hdr->d_addr, &temp_addr);
+        ether_addr_copy(&pkt_eth_hdr->s_addr, &pkt_eth_hdr->d_addr);
+        ether_addr_copy(&temp_addr, &pkt_eth_hdr->s_addr);
+
+        /* Send back packets */
+        while (rte_eth_tx_burst(PORT_ID, 0, &pkt, 1) != 1) {
+        //Retry tx
+        }
+    }
+    return -1;
 }
 
 int main(int argc, char *argv[]) {
     struct rte_mempool *mbuf_pool;
+    struct rte_ring *pkt_ring;
 
     /* Initialize the Environment Abstraction Layer (EAL). */
     int ret = rte_eal_init(argc, argv);
@@ -155,12 +168,22 @@ int main(int argc, char *argv[]) {
     if (mbuf_pool == NULL)
         rte_exit(EXIT_FAILURE, "Cannot create mbuf pool\n");
 
+    pkt_ring = rte_ring_create("PKT_RING", 1024, 0, RING_F_SP_ENQ | RING_F_SC_DEQ); 
+
+    if (pkt_ring == NULL) {
+        rte_exit(EXIT_FAILURE, "Cannot create ring rte_ring_create:%d\n", rte_errno);
+    }
+
     /* Initialize port 1. */
     if (port_init(PORT_ID, mbuf_pool) != 0)
         rte_exit(EXIT_FAILURE, "Cannot initialize port %"PRIu16 "\n", PORT_ID);
 
-    /* Call lcore_main on the main core only. */
-    lcore_main();
+    rte_eal_remote_launch(lcore_tx_loop, (void *)pkt_ring, 1);
+    rte_eal_remote_launch(lcore_rx_loop, (void *)pkt_ring, 2);
 
-    return 0;
+    int ret_val;
+    if (rte_eal_wait_lcore(1) < 0 || rte_eal_wait_lcore(2) < 0) {
+       ret_val = -1; 
+    }
+    return ret_val;
 }

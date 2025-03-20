@@ -49,7 +49,7 @@ static const struct rte_eth_conf port_conf_default = {
 // Array to store RTT values
 static double rtt_values[NUM_PACKETS];
 // Array to track sent packets
-static struct packet_metadata packet_records[NUM_PACKETS];
+static struct packet_metadata packet_records[NUM_PACKETS] = {{0,0,0}};
 
 static int double_compare(const double *a, const double *b);
 

@@ -5,7 +5,7 @@ include $(RTE_SDK)/mk/rte.vars.mk
 APP = echo_client
 
 # Define source files
-SRCS-y += echo_client.c
+SRCS-y += src/echo_client.c
 
 # Default target, can be overridden by command line or environment
 RTE_TARGET ?= x86_64-native-linuxapp-gcc
