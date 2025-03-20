@@ -34,6 +34,10 @@ static const struct rte_eth_conf port_conf_default = {
     },
 };
 
+//List of globals
+struct rte_mempool *mbuf_pool;
+struct rte_ring *pkt_ring;
+
 // Function to initialize port
 static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool) {
     struct rte_eth_conf port_conf = port_conf_default;
@@ -98,8 +102,7 @@ static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool) {
 }
 
 // Rx loop
-static int lcore_rx_loop(void *args) {
-    struct rte_ring *pkt_ring = (struct rte_ring*)args;
+static int lcore_rx_loop(void __rte_unused *args) {
     struct rte_mbuf *bufs[BURST_SIZE];
     struct ether_hdr *eth_hdr;
     uint16_t port = PORT_ID;  // Use port 1
@@ -122,7 +125,6 @@ static int lcore_rx_loop(void *args) {
 
 //Tx loop
 static int lcore_tx_loop(void *args) {
-    struct rte_ring *pkt_ring = (struct rte_ring *)args;
     struct rte_mbuf *pkt;
     while(1) {
         if (rte_ring_dequeue(pkt_ring, (void **)&pkt) == -ENOENT) {
@@ -130,14 +132,14 @@ static int lcore_tx_loop(void *args) {
         }
         /* Swap source and destination MAC addresses */
         struct ether_hdr *pkt_eth_hdr = rte_pktmbuf_mtod(pkt, struct ether_hdr*);
-        uint8_t (*addr_bytes)[ETHER_ADDR_LEN] = &pkt_eth_hdr->d_addr.addr_bytes;
-        printf("Got a packet from: %x:%x:%x:%x:%x:%x\n", (*addr_bytes)[0], (*addr_bytes)[1], (*addr_bytes)[2], (*addr_bytes)[3], (*addr_bytes)[4], (*addr_bytes)[5]);
+        //uint8_t (*addr_bytes)[ETHER_ADDR_LEN] = &pkt_eth_hdr->d_addr.addr_bytes;
+        //printf("Got a packet from: %x:%x:%x:%x:%x:%x\n", (*addr_bytes)[0], (*addr_bytes)[1], (*addr_bytes)[2], (*addr_bytes)[3], (*addr_bytes)[4], (*addr_bytes)[5]);
         struct ether_addr temp_addr;
         ether_addr_copy(&pkt_eth_hdr->d_addr, &temp_addr);
         ether_addr_copy(&pkt_eth_hdr->s_addr, &pkt_eth_hdr->d_addr);
         ether_addr_copy(&temp_addr, &pkt_eth_hdr->s_addr);
 
-        /* Send back packets */
+        /* Send back packet*/
         while (rte_eth_tx_burst(PORT_ID, 0, &pkt, 1) != 1) {
         //Retry tx
         }
@@ -146,9 +148,6 @@ static int lcore_tx_loop(void *args) {
 }
 
 int main(int argc, char *argv[]) {
-    struct rte_mempool *mbuf_pool;
-    struct rte_ring *pkt_ring;
-
     /* Initialize the Environment Abstraction Layer (EAL). */
     int ret = rte_eal_init(argc, argv);
     if (ret < 0)
@@ -178,8 +177,8 @@ int main(int argc, char *argv[]) {
     if (port_init(PORT_ID, mbuf_pool) != 0)
         rte_exit(EXIT_FAILURE, "Cannot initialize port %"PRIu16 "\n", PORT_ID);
 
-    rte_eal_remote_launch(lcore_tx_loop, (void *)pkt_ring, 1);
-    rte_eal_remote_launch(lcore_rx_loop, (void *)pkt_ring, 2);
+    rte_eal_remote_launch(lcore_tx_loop, NULL, 1);
+    rte_eal_remote_launch(lcore_rx_loop, NULL, 2);
 
     int ret_val;
     if (rte_eal_wait_lcore(1) < 0 || rte_eal_wait_lcore(2) < 0) {

@@ -2,10 +2,7 @@
 // Sends packets and measures RTT when they return
 // Uses port 1, leaving port 0 for Linux
 
-#include "generic/rte_rwlock.h"
 #include "rte_ether.h"
-#include "rte_mempool.h"
-#include "rte_ring.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -22,7 +19,6 @@
 #include <rte_ethdev.h>
 #include <rte_mbuf.h>
 #include <rte_cycles.h>
-#include <rte_rwlock.h>
 
 #define RX_RING_SIZE 1024
 #define TX_RING_SIZE 1024
@@ -42,7 +38,6 @@ struct packet_metadata {
     uint32_t sequence;
     uint64_t timestamp;
     uint8_t received;
-    rte_rwlock_t rwlock;
 };
 
 static const struct rte_eth_conf port_conf_default = {
@@ -57,11 +52,6 @@ static double rtt_values[NUM_PACKETS];
 static struct packet_metadata packet_records[NUM_PACKETS] = {{0,0,0}};
 
 static int double_compare(const double *a, const double *b);
-
-//List of globals:
-uint64_t tsc_hz;
-struct rte_mempool *mbuf_pool;
-struct rte_ring *pkt_ring;
 
 // Initialize port
 static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool) {
@@ -186,49 +176,16 @@ static void calculate_statistics(double *mean, double *stddev, int received_coun
     *stddev = sqrt(sum / received_count);
 }
 
-//Tx func
-int lcore_tx_packets(void __rte_unused *args) {
-    for (int i = 0; i<NUM_PACKETS; ++i) {
-        struct rte_mbuf *pkt = create_packet(mbuf_pool, PORT_ID, i);
-        if (pkt == NULL)
-            rte_exit(EXIT_FAILURE, "Failed to create packet %d\n", i);
-
-        while (rte_eth_tx_burst(PORT_ID, 0, &pkt, 1) != 1) {
-            //Keep trying tx
-        }
-        uint64_t sent_time = rte_rdtsc();
-        //record sent time
-        rte_rwlock_write_lock(&packet_records[i].rwlock);
-        packet_records[i].timestamp = sent_time;
-        rte_rwlock_write_unlock(&packet_records[i].rwlock);
-    }
-    return 0;
-}
-
-//Rx func
-int lcore_rx_packets(void __rte_unused *args) {
-    uint16_t num_packets_received = 0;
-    struct rte_mbuf *rx_packets[32];
-    while (num_packets_received < NUM_PACKETS) {
-        uint16_t num_rx_now = rte_eth_rx_burst(PORT_ID, 0, rx_packets, 32);
-        for (int i = 0; i < num_rx_now; ++i) {
-            uint32_t *rx_seq = rte_pktmbuf_mtod_offset(rx_packets[i], uint32_t *, sizeof(struct ether_hdr)); 
-            uint64_t curr_time = rte_rdtsc(); 
-            if (*rx_seq < NUM_PACKETS) {
-                rte_rwlock_read_lock(&packet_records[*rx_seq].rwlock);
-                double rtt_us = (double)(curr_time - packet_records[*rx_seq].timestamp) * 1000000 / tsc_hz;
-                rtt_values[*rx_seq] = rtt_us; 
-                packet_records[*rx_seq].received = 1;
-                rte_rwlock_read_unlock(&packet_records[*rx_seq].rwlock);
-            }
-        } 
-        num_packets_received += num_rx_now;
-    }
-    return 0;
-}
-
 int main(int argc, char *argv[]) {
-    int ret;
+    struct rte_mempool *mbuf_pool;
+    uint16_t port = PORT_ID;  // Use port 1
+    int ret, i;
+    struct rte_mbuf *pkts[NUM_PACKETS];
+    struct rte_mbuf *rx_pkts[32];
+    uint32_t *rx_seq;
+    struct ether_hdr *eth_hdr;
+    uint64_t start_tsc, end_tsc, current_tsc;
+    uint64_t tsc_hz;
     double mean_rtt = 0.0, stddev_rtt = 0.0;
     int packets_received = 0;
     int retry_count = 0;
@@ -257,24 +214,93 @@ int main(int argc, char *argv[]) {
         rte_exit(EXIT_FAILURE, "Cannot create mbuf pool\n");
     
     /* Initialize port */
-    if (port_init(PORT_ID, mbuf_pool) != 0)
-        rte_exit(EXIT_FAILURE, "Cannot init port %"PRIu16 "\n", PORT_ID);
+    if (port_init(port, mbuf_pool) != 0)
+        rte_exit(EXIT_FAILURE, "Cannot init port %"PRIu16 "\n", port);
     
-    printf("Sending %d packets on port %u to measure RTT...\n", NUM_PACKETS, PORT_ID);
+    printf("Sending %d packets on port %u to measure RTT...\n", NUM_PACKETS, port);
     
     // Initialize packet tracking
-    for (int i = 0; i < NUM_PACKETS; i++) {
+    for (i = 0; i < NUM_PACKETS; i++) {
         packet_records[i].sequence = i;
         packet_records[i].received = 0;
-        rte_rwlock_init(&packet_records[i].rwlock);
     }
-    //Launch RX and TX loops
-    rte_eal_remote_launch(lcore_rx_packets, NULL, 1);
-    rte_eal_remote_launch(lcore_tx_packets, NULL, 2);
-
-    rte_eal_wait_lcore(2);
-    rte_eal_wait_lcore(1);
-
+    
+    // Create and send all packets
+    for (i = 0; i < NUM_PACKETS; i++) {
+        // Create packet
+        pkts[i] = create_packet(mbuf_pool, port, i);
+        if (pkts[i] == NULL)
+            rte_exit(EXIT_FAILURE, "Failed to create packet %d\n", i);
+        
+        // Send packet and record timestamp
+        start_tsc = rte_rdtsc();
+        packet_records[i].timestamp = start_tsc;
+        
+        if (rte_eth_tx_burst(port, 0, &pkts[i], 1) != 1) {
+            printf("Failed to send packet %d\n", i);
+            rte_pktmbuf_free(pkts[i]);
+            continue;
+        }
+    }
+    
+    // Receive loop with timeout
+    start_tsc = rte_rdtsc();
+    while (packets_received < NUM_PACKETS) {
+        // Check timeout
+        current_tsc = rte_rdtsc();
+        if ((current_tsc - start_tsc) > (tsc_hz * TIMEOUT_SEC)) {
+            if (retry_count >= max_retries)
+                break;
+            
+            printf("Timeout occurred. Resending unacknowledged packets. Attempt %d/%d\n", 
+                   retry_count + 1, max_retries);
+            
+            // Resend unacknowledged packets
+            for (i = 0; i < NUM_PACKETS; i++) {
+                if (!packet_records[i].received) {
+                    struct rte_mbuf *new_pkt = create_packet(mbuf_pool, port, i);
+                    if (new_pkt == NULL) continue;
+                    
+                    packet_records[i].timestamp = rte_rdtsc();
+                    if (rte_eth_tx_burst(port, 0, &new_pkt, 1) != 1) {
+                        rte_pktmbuf_free(new_pkt);
+                    }
+                }
+            }
+            
+            start_tsc = rte_rdtsc();
+            retry_count++;
+            continue;
+        }
+        
+        // Try to receive packets
+        const uint16_t nb_rx = rte_eth_rx_burst(port, 0, rx_pkts, 32);
+        
+        // Process received packets
+        for (i = 0; i < nb_rx; i++) {
+            end_tsc = rte_rdtsc();
+            
+            // Extract sequence number
+            eth_hdr = rte_pktmbuf_mtod(rx_pkts[i], struct ether_hdr *);
+            rx_seq = rte_pktmbuf_mtod_offset(rx_pkts[i], uint32_t *, sizeof(struct ether_hdr));
+            
+            // Make sure sequence number is valid
+            if (*rx_seq < NUM_PACKETS && !packet_records[*rx_seq].received) {
+                // Calculate RTT
+                double rtt_us = (double)(end_tsc - packet_records[*rx_seq].timestamp) * 1000000 / tsc_hz;
+                rtt_values[packets_received] = rtt_us;
+                packet_records[*rx_seq].received = 1;
+                packets_received++;
+                
+                // Print progress
+                if (packets_received % 100 == 0 || packets_received == NUM_PACKETS)
+                    printf("Received %d packets\n", packets_received);
+            }
+            
+            rte_pktmbuf_free(rx_pkts[i]);
+        }
+    }
+    
     // Calculate and print statistics
     if (packets_received > 0) {
         calculate_statistics(&mean_rtt, &stddev_rtt, packets_received);
@@ -305,8 +331,8 @@ int main(int argc, char *argv[]) {
     }
     
     // Clean up
-    rte_eth_dev_stop(PORT_ID);
-    rte_eth_dev_close(PORT_ID);
+    rte_eth_dev_stop(port);
+    rte_eth_dev_close(port);
     rte_eal_cleanup();
     
     return 0;
