@@ -1,6 +1,7 @@
 // echo_server.c - DPDK 18.11 Echo Server
 // Receives packets and sends them back to sender
 // Uses port 1, leaving port 0 for Linux
+// The hosts are assumed to be L2 connected via ethernet
 
 #include "rte_ether.h"
 #include "rte_ring.h"
@@ -37,6 +38,7 @@ static const struct rte_eth_conf port_conf_default = {
 //List of globals
 struct rte_mempool *mbuf_pool;
 struct rte_ring *pkt_ring;
+struct ether_addr my_addr;
 
 // Function to initialize port
 static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool) {
@@ -92,11 +94,10 @@ static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool) {
     rte_eth_promiscuous_enable(port);
 
     /* Display port MAC address */
-    struct ether_addr addr;
-    rte_eth_macaddr_get(port, &addr);
+    rte_eth_macaddr_get(port, &my_addr);
     printf("Port %u MAC: %02" PRIx8 ":%02" PRIx8 ":%02" PRIx8 ":%02" PRIx8 ":%02" PRIx8 ":%02" PRIx8 "\n",
-        port, addr.addr_bytes[0], addr.addr_bytes[1], addr.addr_bytes[2],
-        addr.addr_bytes[3], addr.addr_bytes[4], addr.addr_bytes[5]);
+        port, my_addr.addr_bytes[0], my_addr.addr_bytes[1], my_addr.addr_bytes[2],
+        my_addr.addr_bytes[3], my_addr.addr_bytes[4], my_addr.addr_bytes[5]);
 
     return 0;
 }
@@ -113,9 +114,6 @@ static int lcore_rx_loop(void __rte_unused *args) {
         /* Get burst of RX packets. */
         const uint16_t nb_rx = rte_eth_rx_burst(port, 0, bufs, BURST_SIZE);
 
-        if (nb_rx == 0)
-            continue;
-
         for (int i = 0; i < nb_rx; ++i) {
             rte_ring_enqueue(pkt_ring, (void *)bufs[i]);
         }
@@ -124,7 +122,7 @@ static int lcore_rx_loop(void __rte_unused *args) {
 }
 
 //Tx loop
-static int lcore_tx_loop(void *args) {
+static int lcore_tx_loop(void __rte_unused *args) {
     struct rte_mbuf *pkt;
     while(1) {
         if (rte_ring_dequeue(pkt_ring, (void **)&pkt) == -ENOENT) {
@@ -135,9 +133,8 @@ static int lcore_tx_loop(void *args) {
         //uint8_t (*addr_bytes)[ETHER_ADDR_LEN] = &pkt_eth_hdr->d_addr.addr_bytes;
         //printf("Got a packet from: %x:%x:%x:%x:%x:%x\n", (*addr_bytes)[0], (*addr_bytes)[1], (*addr_bytes)[2], (*addr_bytes)[3], (*addr_bytes)[4], (*addr_bytes)[5]);
         struct ether_addr temp_addr;
-        ether_addr_copy(&pkt_eth_hdr->d_addr, &temp_addr);
         ether_addr_copy(&pkt_eth_hdr->s_addr, &pkt_eth_hdr->d_addr);
-        ether_addr_copy(&temp_addr, &pkt_eth_hdr->s_addr);
+        ether_addr_copy(&my_addr, &pkt_eth_hdr->s_addr);
 
         /* Send back packet*/
         while (rte_eth_tx_burst(PORT_ID, 0, &pkt, 1) != 1) {

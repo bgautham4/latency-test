@@ -1,6 +1,7 @@
 // echo_client.c - DPDK 18.11 Client for RTT measurement
 // Sends packets and measures RTT when they return
 // Uses port 1, leaving port 0 for Linux
+// The hosts are assumed to be L2 connected via ethernet
 
 #include "generic/rte_rwlock.h"
 #include "rte_ether.h"
@@ -60,6 +61,7 @@ static int double_compare(const double *a, const double *b);
 
 //List of globals:
 uint64_t tsc_hz;
+struct ether_addr daddr;
 struct rte_mempool *mbuf_pool;
 struct rte_ring *pkt_ring;
 
@@ -133,10 +135,10 @@ static struct rte_mbuf* create_packet(struct rte_mempool *mbuf_pool, uint16_t po
     struct ether_addr my_addr;
     struct ether_addr dst_addr = {{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}}; // Broadcast for simplicity
     uint16_t pkt_data_len = sizeof(struct ether_hdr) + sizeof(uint32_t) + PACKET_SIZE;
-    
+
     // Get MAC address
     rte_eth_macaddr_get(port, &my_addr);
-    
+
     // Allocate the packet
     pkt = rte_pktmbuf_alloc(mbuf_pool);
     if (pkt == NULL) {
@@ -188,7 +190,9 @@ static void calculate_statistics(double *mean, double *stddev, int received_coun
 
 //Tx func
 int lcore_tx_packets(void __rte_unused *args) {
-    for (int i = 0; i<NUM_PACKETS; ++i) {
+    printf("Sending %d packets on port %u to measure RTT...\n", NUM_PACKETS, PORT_ID);
+    int i = 0;
+    for (; i<NUM_PACKETS; ++i) {
         struct rte_mbuf *pkt = create_packet(mbuf_pool, PORT_ID, i);
         if (pkt == NULL)
             rte_exit(EXIT_FAILURE, "Failed to create packet %d\n", i);
@@ -202,12 +206,12 @@ int lcore_tx_packets(void __rte_unused *args) {
         packet_records[i].timestamp = sent_time;
         rte_rwlock_write_unlock(&packet_records[i].rwlock);
     }
-    return 0;
+    return i;
 }
 
 //Rx func
 int lcore_rx_packets(void __rte_unused *args) {
-    uint16_t num_packets_received = 0;
+    int num_packets_received = 0;
     struct rte_mbuf *rx_packets[32];
     while (num_packets_received < NUM_PACKETS) {
         uint16_t num_rx_now = rte_eth_rx_burst(PORT_ID, 0, rx_packets, 32);
@@ -224,13 +228,12 @@ int lcore_rx_packets(void __rte_unused *args) {
         } 
         num_packets_received += num_rx_now;
     }
-    return 0;
+    return num_packets_received;
 }
 
 int main(int argc, char *argv[]) {
     int ret;
     double mean_rtt = 0.0, stddev_rtt = 0.0;
-    int packets_received = 0;
     int retry_count = 0;
     int max_retries = 3;
     
@@ -241,7 +244,10 @@ int main(int argc, char *argv[]) {
     
     argc -= ret;
     argv += ret;
-    
+    if (argc != 2) {
+        printf("Usage: %s <EAL args> -- <MAC address>\n", argv[0]);
+        return 1;
+    }
     /* Check that port 1 is available */
     if (!rte_eth_dev_is_valid_port(PORT_ID))
         rte_exit(EXIT_FAILURE, "Port %u is not available. Check that DPDK sees the Mellanox card properly.\n", PORT_ID);
@@ -260,7 +266,18 @@ int main(int argc, char *argv[]) {
     if (port_init(PORT_ID, mbuf_pool) != 0)
         rte_exit(EXIT_FAILURE, "Cannot init port %"PRIu16 "\n", PORT_ID);
     
-    printf("Sending %d packets on port %u to measure RTT...\n", NUM_PACKETS, PORT_ID);
+    // Read MAC address from argument
+    if (sscanf(argv[1], "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+               &daddr.addr_bytes[0], &daddr.addr_bytes[1], &daddr.addr_bytes[2],
+               &daddr.addr_bytes[3], &daddr.addr_bytes[4], &daddr.addr_bytes[5]) != ETHER_ADDR_LEN) {
+        fprintf(stderr, "Invalid MAC address format.\n");
+        return 1;
+    }
+
+    // Print the parsed MAC address
+    printf("Destination MAC Address: %02X:%02X:%02X:%02X:%02X:%02X\n",
+           daddr.addr_bytes[0], daddr.addr_bytes[1], daddr.addr_bytes[2],
+           daddr.addr_bytes[3], daddr.addr_bytes[4], daddr.addr_bytes[5]);
     
     // Initialize packet tracking
     for (int i = 0; i < NUM_PACKETS; i++) {
@@ -272,8 +289,8 @@ int main(int argc, char *argv[]) {
     rte_eal_remote_launch(lcore_rx_packets, NULL, 1);
     rte_eal_remote_launch(lcore_tx_packets, NULL, 2);
 
-    rte_eal_wait_lcore(2);
-    rte_eal_wait_lcore(1);
+    int packets_trasmitted = rte_eal_wait_lcore(2);
+    int packets_received = rte_eal_wait_lcore(1);
 
     // Calculate and print statistics
     if (packets_received > 0) {
