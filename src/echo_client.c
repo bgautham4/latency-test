@@ -133,7 +133,7 @@ static struct rte_mbuf* create_packet(struct rte_mempool *mbuf_pool, uint16_t po
     struct rte_mbuf *pkt;
     struct ether_hdr *eth_hdr;
     struct ether_addr my_addr;
-    struct ether_addr dst_addr = {{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}}; // Broadcast for simplicity
+    //struct ether_addr dst_addr = {{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}}; // Broadcast for simplicity
     uint16_t pkt_data_len = sizeof(struct ether_hdr) + sizeof(uint32_t) + PACKET_SIZE;
 
     // Get MAC address
@@ -153,7 +153,7 @@ static struct rte_mbuf* create_packet(struct rte_mempool *mbuf_pool, uint16_t po
     
     // Initialize Ethernet header
     eth_hdr = rte_pktmbuf_mtod(pkt, struct ether_hdr *);
-    ether_addr_copy(&dst_addr, &eth_hdr->d_addr);
+    ether_addr_copy(&daddr, &eth_hdr->d_addr);
     ether_addr_copy(&my_addr, &eth_hdr->s_addr);
     eth_hdr->ether_type = rte_cpu_to_be_16(0x1234); // Custom type for our test
     
