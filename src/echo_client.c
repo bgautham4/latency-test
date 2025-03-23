@@ -33,7 +33,7 @@
 
 #define NUM_PACKETS 1000
 #define PACKET_SIZE 64  // Payload size
-#define TIMEOUT_RX 60   // Timeout in seconds
+#define TIMEOUT_RX 10   // Timeout in seconds
 
 // Use port 1 (second port) on the Mellanox card
 #define PORT_ID 1
@@ -215,7 +215,7 @@ int lcore_rx_packets(void __rte_unused *args) {
     struct rte_mbuf *rx_packets[32];
     uint64_t curr_time = rte_rdtsc();
     uint64_t last_time = curr_time;
-    while (num_packets_received < NUM_PACKETS && (curr_time - last_time)/tsc_hz < TIMEOUT_RX) {
+    while (num_packets_received < NUM_PACKETS && (curr_time - last_time) < (tsc_hz * TIMEOUT_RX)) {
         uint16_t num_rx_now = rte_eth_rx_burst(PORT_ID, 0, rx_packets, 32);
         curr_time = rte_rdtsc(); 
         if (num_rx_now == 0) {
