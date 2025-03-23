@@ -33,7 +33,7 @@
 
 #define NUM_PACKETS 1000
 #define PACKET_SIZE 64  // Payload size
-#define TIMEOUT_SEC 2   // Timeout in seconds
+#define TIMEOUT_RX 60   // Timeout in seconds
 
 // Use port 1 (second port) on the Mellanox card
 #define PORT_ID 1
@@ -213,20 +213,26 @@ int lcore_tx_packets(void __rte_unused *args) {
 int lcore_rx_packets(void __rte_unused *args) {
     int num_packets_received = 0;
     struct rte_mbuf *rx_packets[32];
-    while (num_packets_received < NUM_PACKETS) {
+    uint64_t curr_time = rte_rdtsc();
+    uint64_t last_time = curr_time;
+    while (num_packets_received < NUM_PACKETS && (curr_time - last_time)/tsc_hz < TIMEOUT_RX) {
         uint16_t num_rx_now = rte_eth_rx_burst(PORT_ID, 0, rx_packets, 32);
+        curr_time = rte_rdtsc(); 
+        if (num_rx_now == 0) {
+            continue;
+        }
         for (int i = 0; i < num_rx_now; ++i) {
             uint32_t *rx_seq = rte_pktmbuf_mtod_offset(rx_packets[i], uint32_t *, sizeof(struct ether_hdr)); 
-            uint64_t curr_time = rte_rdtsc(); 
             if (*rx_seq < NUM_PACKETS) {
                 rte_rwlock_read_lock(&packet_records[*rx_seq].rwlock);
-                double rtt_us = (double)(curr_time - packet_records[*rx_seq].timestamp) * 1000000 / tsc_hz;
+                double rtt_us = (double)(curr_time - packet_records[*rx_seq].timestamp) * 1e6 / tsc_hz; //In us
                 rtt_values[*rx_seq] = rtt_us; 
                 packet_records[*rx_seq].received = 1;
                 rte_rwlock_read_unlock(&packet_records[*rx_seq].rwlock);
             }
         } 
         num_packets_received += num_rx_now;
+        last_time = curr_time;
     }
     return num_packets_received;
 }
@@ -234,14 +240,12 @@ int lcore_rx_packets(void __rte_unused *args) {
 int main(int argc, char *argv[]) {
     int ret;
     double mean_rtt = 0.0, stddev_rtt = 0.0;
-    int retry_count = 0;
-    int max_retries = 3;
-    
+
     /* Initialize the Environment Abstraction Layer (EAL). */
     ret = rte_eal_init(argc, argv);
     if (ret < 0)
         rte_exit(EXIT_FAILURE, "Error with EAL initialization\n");
-    
+
     argc -= ret;
     argv += ret;
     if (argc != 2) {
@@ -251,21 +255,21 @@ int main(int argc, char *argv[]) {
     /* Check that port 1 is available */
     if (!rte_eth_dev_is_valid_port(PORT_ID))
         rte_exit(EXIT_FAILURE, "Port %u is not available. Check that DPDK sees the Mellanox card properly.\n", PORT_ID);
-    
+
     /* Get the frequency of the TSC counter */
     tsc_hz = rte_get_tsc_hz();
-    
+
     /* Creates a new mempool in memory to hold the mbufs. */
     mbuf_pool = rte_pktmbuf_pool_create("MBUF_POOL", NUM_MBUFS,
         MBUF_CACHE_SIZE, 0, RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
-    
+
     if (mbuf_pool == NULL)
         rte_exit(EXIT_FAILURE, "Cannot create mbuf pool\n");
-    
+
     /* Initialize port */
     if (port_init(PORT_ID, mbuf_pool) != 0)
         rte_exit(EXIT_FAILURE, "Cannot init port %"PRIu16 "\n", PORT_ID);
-    
+
     // Read MAC address from argument
     if (sscanf(argv[1], "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
                &daddr.addr_bytes[0], &daddr.addr_bytes[1], &daddr.addr_bytes[2],
@@ -278,7 +282,7 @@ int main(int argc, char *argv[]) {
     printf("Destination MAC Address: %02X:%02X:%02X:%02X:%02X:%02X\n",
            daddr.addr_bytes[0], daddr.addr_bytes[1], daddr.addr_bytes[2],
            daddr.addr_bytes[3], daddr.addr_bytes[4], daddr.addr_bytes[5]);
-    
+
     // Initialize packet tracking
     for (int i = 0; i < NUM_PACKETS; i++) {
         packet_records[i].sequence = i;
@@ -300,8 +304,8 @@ int main(int argc, char *argv[]) {
         printf("Packets received: %d\n", packets_received);
         printf("Mean RTT: %.2f microseconds\n", mean_rtt);
         printf("Standard Deviation: %.2f microseconds\n", stddev_rtt);
-        
         // Print detailed percentile information
+
         if (packets_received >= 10) {
             // Sort RTT values for percentile calculation
             qsort(rtt_values, packets_received, sizeof(double), 
@@ -320,7 +324,7 @@ int main(int argc, char *argv[]) {
     } else {
         printf("No packets received. Check if the echo server is running.\n");
     }
-    
+
     // Clean up
     rte_eth_dev_stop(PORT_ID);
     rte_eth_dev_close(PORT_ID);
