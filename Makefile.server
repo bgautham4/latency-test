@@ -2,7 +2,7 @@
 include $(RTE_SDK)/mk/rte.vars.mk
 
 # Define the applications to build
-APP = echo_server 
+APP = echo_server
 
 # Define source files
 SRCS-y += src/echo_server.c
